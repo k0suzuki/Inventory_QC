@@ -11,8 +11,9 @@ from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from dotenv import load_dotenv
 
-# .envを読み込み
-load_dotenv()
+env_loaded = load_dotenv()
+if not env_loaded:
+    print(".envファイルの読み込みに失敗しました。デフォルト値を使用します。")
 
 def send_low_stock_email_no_oauth(low_stock_items, sender_email_default, sender_password_default, recipient_email):
     # 環境変数から認証情報取得（設定されていない場合はデフォルト値を利用）
@@ -48,16 +49,14 @@ class InventoryApp:
     def __init__(self, root):
         self.root = root
         self.root.title("在庫管理アプリ")
-        self.root.geometry("600x600")
+        self.root.geometry("1000x400")
         
-        # 管理者パスワード（任意の文字列に変更可）
-        self.admin_password = "admin"
-        # メール設定の初期値（.envの設定が無い場合はこちらを利用）
-        self.sender_email = "inaki.inventory.test@gmail.com"
-        self.sender_password = "inrk xdot xqhe vdge"
-        self.recipient_email = "fer65s@gmail.com"
+        # 認証情報およびメール設定を環境変数から取得（未設定の場合はデフォルト値を設定）
+        self.admin_password = os.getenv("ADMIN_PASSWORD", "default_admin")
+        self.sender_email = os.getenv("GMAIL_USER", "default_sender@example.com")
+        self.sender_password = os.getenv("GMAIL_APP_PASSWORD", "default_app_password")
+        self.recipient_email = os.getenv("RECIPIENT_EMAIL", "default_recipient@example.com")
         
-        # Excelファイルの読み込み
         if not os.path.exists(self.EXCEL_FILE):
             messagebox.showerror("読み込みエラー", f"指定したExcelファイルが存在しません: {self.EXCEL_FILE}")
             self.root.destroy()
@@ -65,10 +64,7 @@ class InventoryApp:
 
         try:
             df = pd.read_excel(self.EXCEL_FILE)
-            print("Excelファイルの読み込みに成功しました")
-            # 各商品の情報は辞書のリストとして保持
             self.inventory_data = df.to_dict("records")
-            # 台帳に閾値が無い場合、デフォルトの閾値（例: 5）を設定する
             for item in self.inventory_data:
                 if "threshold" not in item or pd.isna(item["threshold"]):
                     item["threshold"] = 5
@@ -77,11 +73,17 @@ class InventoryApp:
             self.root.destroy()
             return
 
-        # QRコードキャンセルフラグ
         self.cancel_qr = False
 
-        # Treeview：在庫一覧表示　（「threshold」を追加）
-        self.inventory_tree = ttk.Treeview(root, 
+        # 追加: フィルタ用変数を初期化
+        self.category_vars = {}
+        self.location_vars = {}
+
+        # --- レイアウト変更開始 ---
+        # 左：在庫一覧(Treeview)用フレーム（スクロールバー追加）
+        self.tree_frame = tk.Frame(root)
+        self.tree_frame.grid(row=0, column=0, padx=10, pady=10, sticky="nsew")
+        self.inventory_tree = ttk.Treeview(self.tree_frame, 
             columns=("id", "name", "category", "quantity", "location", "threshold"), 
             show="headings", height=15)
         self.inventory_tree.heading("id", text="ID")
@@ -96,30 +98,50 @@ class InventoryApp:
         self.inventory_tree.column("quantity", width=50, anchor="center")
         self.inventory_tree.column("location", width=150)
         self.inventory_tree.column("threshold", width=50, anchor="center")
-        self.inventory_tree.grid(row=0, column=0, padx=10, pady=10)
+        self.inventory_tree.pack(side="left", fill="both", expand=True)
+        scrollbar = ttk.Scrollbar(self.tree_frame, orient="vertical", command=self.inventory_tree.yview)
+        self.inventory_tree.configure(yscrollcommand=scrollbar.set)
+        scrollbar.pack(side="right", fill="y")
 
-        # フィルターエリア：カテゴリと保管場所のチェックボックス
-        self.filter_frame = tk.Frame(root)
-        self.filter_frame.grid(row=0, column=1, padx=10, pady=10, sticky="n")
-        self.filtered_inventory = []
-        self.show_all_var = tk.IntVar(value=1)
-        self.category_vars = {}
-        self.location_vars = {}
-
-        self.show_all_cb = tk.Checkbutton(self.filter_frame, text="全表示", 
-                                          variable=self.show_all_var, 
-                                          command=self.on_show_all_change)
-        self.show_all_cb.pack(anchor="w")
-        self.update_category_checkboxes()
+        # 右：フィルター用コンテナフレーム（全フィルター解除ボタンとフィルタ群）
+        self.filter_container = tk.Frame(root)
+        self.filter_container.grid(row=0, column=1, padx=10, pady=10, sticky="n")
+        # フィルタボタン（全フィルター解除のみ）を配置
+        filter_button_frame = tk.Frame(self.filter_container)
+        filter_button_frame.pack(anchor="w", pady=(0,10))
+        tk.Button(filter_button_frame, text="フィルタ解除", width=15, command=self.clear_filters)\
+                .pack(side="left", padx=5)
+        # フィルタ一覧を横並びに配置するためのフレーム
+        filters_frame = tk.Frame(self.filter_container)
+        filters_frame.pack(fill="x", expand=True)
+        
+        # カテゴリフィルタ（上端揃え）
+        self.cat_filter_frame = tk.Frame(filters_frame)
+        self.cat_filter_frame.pack(side="left", padx=5, anchor="n")
+        tk.Label(self.cat_filter_frame, text="【カテゴリ】", font=("Helvetica", 10, "bold"))\
+            .pack(anchor="w", pady=(0,5))
+        self.update_category_checkboxes(in_frame_only=True)
+        
+        # 保管場所フィルタ（上端揃え）
+        self.loc_filter_frame = tk.Frame(filters_frame)
+        self.loc_filter_frame.pack(side="left", padx=5, anchor="n")
+        tk.Label(self.loc_filter_frame, text="【保管場所】", font=("Helvetica", 10, "bold"))\
+            .pack(anchor="w", pady=(0,5))
         self.update_location_checkboxes()
-
-        # 「全フィルター解除」ボタン：全てのチェックを解除して全件表示となるようにする
-        tk.Button(self.filter_frame, text="全フィルター解除", command=self.clear_filters).pack(pady=10)
-
-        # メイン機能ボタンの配置
+        # --- レイアウト変更終了 ---
+        
+        # 下部：機能ボタン配置（左詰め）
         self.button_frame = tk.Frame(root)
-        self.button_frame.grid(row=1, column=0, padx=10, pady=10)
+        self.button_frame.grid(row=1, column=0, columnspan=2, padx=10, pady=10, sticky="w")
         self.create_buttons()
+        self.update_inventory_display()
+        
+    def show_all_items(self):
+        """全表示ボタン用：フィルターを無視してすべて表示"""
+        for var in self.category_vars.values():
+            var.set(0)
+        for var in self.location_vars.values():
+            var.set(0)
         self.update_inventory_display()
 
     def update_inventory_display(self):
@@ -128,7 +150,7 @@ class InventoryApp:
         for row in self.inventory_tree.get_children():
             self.inventory_tree.delete(row)
 
-        # 選択中のフィルター条件（各グループで１つでもチェックがあればそのリスト、それ以外は None として全件対象に）
+        # 選択中のフィルター条件を取得
         selected_categories = [cat for cat, var in self.category_vars.items() if var.get() == 1]
         selected_locations = [loc for loc, var in self.location_vars.items() if var.get() == 1]
 
@@ -137,17 +159,12 @@ class InventoryApp:
             item_cat = str(item.get("category") or "未設定")
             item_loc = str(item.get("location") or "未設定")
 
-            # カテゴリフィルタの判定：
-            # 　→ もしselected_categoriesが空なら全件対象、それ以外の場合はitem_catがリストにあればOK
             if selected_categories and (item_cat not in selected_categories):
                 continue
 
-            # 保管場所フィルタの判定：
             if selected_locations and (item_loc not in selected_locations):
                 continue
 
-            # 数量、閾値の表示処理（元の処理をほぼ踏襲）
-            loc = item.get("location") or "未設定"
             try:
                 quantity = 0 if pd.isna(item['quantity']) else int(item['quantity'])
             except Exception:
@@ -155,53 +172,85 @@ class InventoryApp:
             threshold = item.get("threshold")
             if threshold is None or pd.isna(threshold):
                 threshold = "未設定"
+            # 発注中なら商品名の前に【発注中】を表示
+            name_to_show = item["name"]
+            if item.get("order_pending", False):
+                name_to_show = "【発注中】" + name_to_show
+
             self.filtered_inventory.append(item)
             self.inventory_tree.insert("", "end", values=(
-                item["id"], item["name"], item["category"], quantity, loc, threshold))
+                item["id"], name_to_show, item["category"], quantity, item_loc, threshold))
 
-    def update_category_checkboxes(self):
-        # 既存のチェックボックスを削除（全表示以外）
-        for widget in self.filter_frame.winfo_children():
-            if widget != self.show_all_cb:
-                widget.destroy()
+    def update_category_checkboxes(self, in_frame_only=False):
+        # 既存のウィジェットをクリア
+        for widget in self.cat_filter_frame.winfo_children():
+            widget.destroy()
+        # ラベルを表示
+        tk.Label(self.cat_filter_frame, text="【カテゴリ】", font=("Helvetica", 10, "bold"))\
+            .pack(anchor="w", pady=(0,5))
+            
+        # キャンバスとスクロールバーを作成（表示行数は高さで調整、ここでは150pxとして例示）
+        canvas = tk.Canvas(self.cat_filter_frame, width=150, height=150)
+        scrollbar = tk.Scrollbar(self.cat_filter_frame, orient="vertical", command=canvas.yview)
+        scrollable_frame = tk.Frame(canvas)
+        
+        scrollable_frame.bind(
+            "<Configure>",
+            lambda e: canvas.configure(scrollregion=canvas.bbox("all"))
+        )
+        
+        canvas.create_window((0, 0), window=scrollable_frame, anchor="nw")
+        canvas.configure(yscrollcommand=scrollbar.set)
+        
+        canvas.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
+        
         self.category_vars.clear()
-        tk.Label(self.filter_frame, text="【カテゴリ】", font=("Helvetica", 10, "bold")).pack(anchor="w", pady=(0,5))
         cats = {str(item.get("category") or "未設定") for item in self.inventory_data}
         for cat in sorted(cats):
             var = tk.IntVar(value=0)
             self.category_vars[cat] = var
-            tk.Checkbutton(self.filter_frame, text=cat, variable=var, command=self.on_filter_change).pack(anchor="w")
-        tk.Label(self.filter_frame, text="").pack()  # 少し余白
+            tk.Checkbutton(scrollable_frame, text=cat, variable=var, command=self.on_filter_change)\
+                .pack(anchor="w")
 
     def update_location_checkboxes(self):
-        tk.Label(self.filter_frame, text="【保管場所】", font=("Helvetica", 10, "bold")).pack(anchor="w", pady=(0,5))
-        locs = {str(item.get("location") or "未設定") for item in self.inventory_data}
+        # loc_filter_frame内のウィジェットをすべてクリア
+        for widget in self.loc_filter_frame.winfo_children():
+            widget.destroy()
+        # ラベルを表示
+        tk.Label(self.loc_filter_frame, text="【保管場所】", font=("Helvetica", 10, "bold"))\
+            .pack(anchor="w", pady=(0,5))
+            
+        # キャンバスとスクロールバーを作成（表示行数は高さで調整、ここでは150pxとして例示）
+        canvas = tk.Canvas(self.loc_filter_frame, width=150, height=150)
+        scrollbar = tk.Scrollbar(self.loc_filter_frame, orient="vertical", command=canvas.yview)
+        scrollable_frame = tk.Frame(canvas)
+        
+        scrollable_frame.bind(
+            "<Configure>",
+            lambda e: canvas.configure(scrollregion=canvas.bbox("all"))
+        )
+        
+        canvas.create_window((0, 0), window=scrollable_frame, anchor="nw")
+        canvas.configure(yscrollcommand=scrollbar.set)
+        
+        canvas.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
+        
         self.location_vars.clear()
+        locs = {str(item.get("location") or "未設定") for item in self.inventory_data}
         for loc in sorted(locs):
             var = tk.IntVar(value=0)
             self.location_vars[loc] = var
-            tk.Checkbutton(self.filter_frame, text=loc, variable=var, command=self.on_filter_change).pack(anchor="w")
-
-    def on_show_all_change(self):
-        """全表示チェックボックス変更時の処理"""
-        if self.show_all_var.get() == 1:
-            for var in self.category_vars.values():
-                var.set(0)
-            for var in self.location_vars.values():
-                var.set(0)
-        self.update_inventory_display()
+            tk.Checkbutton(scrollable_frame, text=loc, variable=var, command=self.on_filter_change)\
+                .pack(anchor="w")
 
     def on_filter_change(self):
         """カテゴリまたは保管場所チェックボックス変更時の処理"""
-        if not any(var.get() for var in self.category_vars.values()) and not any(var.get() for var in self.location_vars.values()):
-            self.show_all_var.set(1)
-        else:
-            self.show_all_var.set(0)
         self.update_inventory_display()
 
     def clear_filters(self):
         """全フィルター解除"""
-        self.show_all_var.set(1)
         for var in self.category_vars.values():
             var.set(0)
         for var in self.location_vars.values():
@@ -217,6 +266,9 @@ class InventoryApp:
         """カメラからQRコードを読み取る。キャンセルボタンで中断可能"""
         cancel_window = tk.Toplevel(self.root)
         cancel_window.title("QRコード読み取り中")
+        cancel_window.attributes("-topmost", True)
+        cancel_window.grab_set()
+        cancel_window.focus_force()
         tk.Label(cancel_window, text="QRコード読み取り中です…").pack(padx=10, pady=10)
         tk.Button(cancel_window, text="キャンセル", command=lambda: self.cancel_qr_button(cancel_window)).pack(pady=10)
 
@@ -232,7 +284,7 @@ class InventoryApp:
             if not ret:
                 break
 
-            cv2.putText(frame, "Escキーまたはqで終了", (10, 30),
+            cv2.putText(frame, "EXIT Esc or q", (10, 30),
                         cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2, cv2.LINE_AA)
 
             for obj in decode(frame):
@@ -255,23 +307,30 @@ class InventoryApp:
         return qr_result
 
     def create_qr_code(self):
-        product_ids = [item["id"] for item in self.inventory_data]
-        if not product_ids:
-            messagebox.showwarning("QRコード生成", "台帳に品番が登録されていません。")
+        selected = self.inventory_tree.selection()
+        if not selected:
+            messagebox.showwarning("QRコード生成", "生成する品目をリストから選択してください。")
             return
-        selected_id = simpledialog.askstring("QRコード生成", f"以下の品番から生成する品番を入力してください:\n{', '.join(map(str, product_ids))}")
-        if not selected_id:
-            return
+        item_values = self.inventory_tree.item(selected[0], "values")
+        selected_id = item_values[0]
         selected_item = next((item for item in self.inventory_data if str(item["id"]) == str(selected_id)), None)
         if not selected_item:
-            messagebox.showerror("QRコード生成エラー", f"指定された品番が見つかりません: {selected_id}")
+            messagebox.showerror("QRコード生成エラー", f"選択された品番が見つかりません: {selected_id}")
             return
-        data = f"ID: {selected_item['id']}, 商品名: {selected_item['name']}, カテゴリ: {selected_item['category']}, 数量: {selected_item['quantity']}, 保管場所: {selected_item.get('location', '未設定')}"
-        qr = qrcode.QRCode(version=1, error_correction=qrcode.constants.ERROR_CORRECT_L, box_size=10, border=4)
+
+        data = f"ID: {selected_item['id']}, 商品名: {selected_item['name']}, カテゴリ: {selected_item['category']}, 保管場所: {selected_item.get('location', '未設定')}"
+        qr = qrcode.QRCode(
+            version=1,
+            error_correction=qrcode.constants.ERROR_CORRECT_L,
+            box_size=2,  # 1セルのサイズ
+            border=2     # 周囲の余白
+        )
         qr.add_data(data)
         qr.make(fit=True)
         img = qr.make_image(fill_color="black", back_color="white")
-        save_path = filedialog.asksaveasfilename(defaultextension=".png",
+        default_filename = f"{selected_item['id']}_{selected_item['name']}.png"
+        save_path = filedialog.asksaveasfilename(initialfile=default_filename,
+                                                 defaultextension=".png",
                                                  filetypes=[("PNG Files", "*.png")])
         if save_path:
             img.save(save_path)
@@ -304,7 +363,8 @@ class InventoryApp:
             messagebox.showerror("CSVインポートエラー", f"エラーが発生しました: {e}")
 
     def stock_in(self):
-        choice = messagebox.askquestion("入庫方法選択", "QRコードで入庫しますか？\n「いいえ」を選択するとIDを手動入力します。")
+        choice = messagebox.askquestion("入庫方法選択", 
+                                        "QRコードで入庫しますか？\n「いいえ」を選択すると、リスト選択またはID入力が可能です。")
         if choice == "yes":
             qr_data = self.read_qr_code()
             if not qr_data:
@@ -313,17 +373,29 @@ class InventoryApp:
             if not selected_item:
                 return messagebox.showerror("品番エラー", "QRコードに対応する品番が見つかりません。")
         else:
-            entered_id = simpledialog.askstring("ID入力", "入庫する商品のIDを入力してください:")
-            if not entered_id:
-                return
-            selected_item = next((item for item in self.inventory_data if str(item["id"]) == str(entered_id)), None)
-            if not selected_item:
-                return messagebox.showerror("品番エラー", "入力されたIDに対応する品番が見つかりません。")
-        add_qty = simpledialog.askinteger("入庫", f"{selected_item['name']} の入庫数量を入力してください", minvalue=1)
+            selected = self.inventory_tree.selection()
+            if selected:
+                item_values = self.inventory_tree.item(selected[0], "values")
+                selected_item = next((item for item in self.inventory_data if str(item["id"]) == str(item_values[0])), None)
+            else:
+                # リストに選択がない場合、手動入力するかどうか確認する
+                use_manual = messagebox.askyesno("ID入力確認", 
+                                "リストに選択がありません。\nIDを手動で入力しますか？\n「いいえ」を選択すると、再度リストから選択できます。")
+                if use_manual:
+                    entered_id = simpledialog.askstring("ID入力", "入庫する商品のIDを入力してください:", parent=self.root)
+                    if not entered_id:
+                        return
+                    selected_item = next((item for item in self.inventory_data if str(item["id"]) == str(entered_id)), None)
+                    if not selected_item:
+                        return messagebox.showerror("品番エラー", "入力されたIDに対応する品番が見つかりません。")
+                else:
+                    return
+
+        add_qty = simpledialog.askinteger("入庫", f"{selected_item['name']} の入庫数量を入力してください", parent=self.root, minvalue=1)
         if add_qty is None:
             return
 
-        ok = messagebox.askyesno("確認", f"{selected_item['name']} に {add_qty} 個の入庫を実行します。よろしいですか？")
+        ok = messagebox.askyesno("確認", f"{selected_item['name']} を {add_qty} 個 入庫します。よろしいですか？")
         if not ok:
             return
 
@@ -335,12 +407,13 @@ class InventoryApp:
 
         self.update_inventory_display()
         self.save_inventory_to_excel()
-        messagebox.showinfo("入庫完了", f"{selected_item['name']} に {add_qty} 個を入庫しました。")
+        messagebox.showinfo("入庫完了", f"{selected_item['name']} を {add_qty} 個 入庫しました。")
         self.record_log("入庫", selected_item, add_qty)
 
+
     def stock_out(self):
-        choice = messagebox.askquestion("出庫方法選択",
-                                        "QRコードで出庫しますか？\n「いいえ」を選択するとIDを手動入力します。")
+        choice = messagebox.askquestion("出庫方法選択", 
+                                        "QRコードで出庫しますか？\n「いいえ」を選択すると、リスト選択またはID入力が可能です。")
         if choice == "yes":
             qr_data = self.read_qr_code()
             if not qr_data:
@@ -349,14 +422,24 @@ class InventoryApp:
             if not selected_item:
                 return messagebox.showerror("品番エラー", "QRコードに対応する品番が見つかりません。")
         else:
-            entered_id = simpledialog.askstring("ID入力", "出庫する商品のIDを入力してください:")
-            if not entered_id:
-                return
-            selected_item = next((item for item in self.inventory_data if str(item["id"]) == str(entered_id)), None)
-            if not selected_item:
-                return messagebox.showerror("品番エラー", "入力されたIDに対応する品番が見つかりません。")
+            selected = self.inventory_tree.selection()
+            if selected:
+                item_values = self.inventory_tree.item(selected[0], "values")
+                selected_item = next((item for item in self.inventory_data if str(item["id"]) == str(item_values[0])), None)
+            else:
+                use_manual = messagebox.askyesno("ID入力確認", 
+                                "リストに選択がありません。\nIDを手動で入力しますか？\n「いいえ」を選択すると、再度リストから選択できます。")
+                if use_manual:
+                    entered_id = simpledialog.askstring("ID入力", "出庫する商品のIDを入力してください:", parent=self.root)
+                    if not entered_id:
+                        return
+                    selected_item = next((item for item in self.inventory_data if str(item["id"]) == str(entered_id)), None)
+                    if not selected_item:
+                        return messagebox.showerror("品番エラー", "入力されたIDに対応する品番が見つかりません。")
+                else:
+                    return
 
-        remove_qty = simpledialog.askinteger("出庫", f"{selected_item['name']} の出庫数量を入力してください", minvalue=1)
+        remove_qty = simpledialog.askinteger("出庫", f"{selected_item['name']} の出庫数量を入力してください", parent=self.root, minvalue=1)
         if remove_qty is None:
             return
 
@@ -371,13 +454,13 @@ class InventoryApp:
         self.update_inventory_display()
         self.save_inventory_to_excel()
         self.check_low_stock()
-        messagebox.showinfo("出庫完了", f"{selected_item['name']} から {remove_qty} 個を出庫しました。")
+        messagebox.showinfo("出庫完了", f"{selected_item['name']} を {remove_qty} 個 出庫しました。")
         self.record_log("出庫", selected_item, -remove_qty)
 
     def save_inventory_to_excel(self):
         try:
             pd.DataFrame(self.inventory_data).to_excel(self.EXCEL_FILE, index=False)
-            messagebox.showinfo("Excel保存", f"在庫台帳がExcelファイルに保存されました: {self.EXCEL_FILE}")
+            # messagebox.showinfo("Excel保存", f"在庫台帳がExcelファイルに保存されました: {self.EXCEL_FILE}")
         except Exception as e:
             messagebox.showerror("Excel保存エラー", f"Excel保存に失敗しました: {e}")
 
@@ -462,30 +545,55 @@ class InventoryApp:
         tk.Button(win, text="閉じる", width=20, command=win.destroy).pack(pady=10)
 
     def create_buttons(self):
-        """メイン画面に各機能ボタン（入庫、出庫、台帳入力、設定、終了）を配置"""
+        """メイン画面下部に各機能ボタン（入庫、出庫、発注、台帳入力、設定、終了）を横並びに配置"""
         btn_specs = [
             ("入庫", self.stock_in),
             ("出庫", self.stock_out),
+            ("発注", self.order_product),
             ("台帳入力", self.open_inventory_input),
             ("設定", self.open_settings),
             ("終了", self.root.destroy)
         ]
-
-        for index, (text, command) in enumerate(btn_specs):
+        for text, command in btn_specs:
             btn = tk.Button(self.button_frame, text=text, command=command, width=15)
-            row = index // 2    # 2列レイアウト
-            col = index % 2
-            btn.grid(row=row, column=col, padx=5, pady=5)
+            btn.pack(side="left", padx=5, pady=5)
+
+    def order_product(self):
+        """発注ボタン押下時の処理。対象商品を選択し、発注中フラグを立てる。"""
+        selected = self.inventory_tree.selection()
+        if selected:
+            item_values = self.inventory_tree.item(selected[0], "values")
+            selected_item = next((item for item in self.inventory_data if str(item["id"]) == str(item_values[0])), None)
+        else:
+            use_manual = messagebox.askyesno("ID入力確認", 
+                                "リストに選択がありません。\nIDを手動で入力しますか？\n「いいえ」を選択すると、再度リストから選択できます。")
+            if use_manual:
+                entered_id = simpledialog.askstring("ID入力", "発注する商品のIDを入力してください:", parent=self.root)
+                if not entered_id:
+                    return
+                selected_item = next((item for item in self.inventory_data if str(item["id"]) == str(entered_id)), None)
+                if not selected_item:
+                    return messagebox.showerror("品番エラー", "入力されたIDに対応する品番が見つかりません。")
+            else:
+                return
+
+        ok = messagebox.askyesno("発注確認", f"{selected_item['name']} を発注します。よろしいですか？")
+        if not ok:
+            return
+
+        selected_item["order_pending"] = True
+        self.update_inventory_display()
+        messagebox.showinfo("発注完了", f"{selected_item['name']} は発注中です。")
 
     def open_settings(self):
-        pwd = simpledialog.askstring("管理者認証", "管理者パスワードを入力してください", show="*")
+        pwd = simpledialog.askstring("管理者認証", "管理者パスワードを入力してください", parent=self.root, show="*")
         if pwd != self.admin_password:
             messagebox.showerror("認証エラー", "パスワードが間違っています。")
             return
 
         settings_win = tk.Toplevel(self.root)
-        settings_win.title("メール設定")
-        settings_win.geometry("350x250")
+        settings_win.title("メール＆台帳設定")
+        settings_win.geometry("400x300")
 
         tk.Label(settings_win, text="送信元メールアドレス:").grid(row=0, column=0, padx=10, pady=5, sticky="w")
         entry_sender = tk.Entry(settings_win, width=30)
@@ -502,15 +610,29 @@ class InventoryApp:
         entry_recipient.grid(row=2, column=1, padx=5, pady=5)
         entry_recipient.insert(0, self.recipient_email)
 
+        tk.Label(settings_win, text="台帳ファイル:").grid(row=3, column=0, padx=10, pady=5, sticky="w")
+        entry_excel = tk.Entry(settings_win, width=30)
+        entry_excel.grid(row=3, column=1, padx=5, pady=5)
+        entry_excel.insert(0, self.EXCEL_FILE)
+
+        def choose_excel_file():
+            file_path = filedialog.askopenfilename(filetypes=[("Excel Files", "*.xlsx *.xls")])
+            if file_path:
+                entry_excel.delete(0, tk.END)
+                entry_excel.insert(0, file_path)
+
+        tk.Button(settings_win, text="参照", command=choose_excel_file).grid(row=3, column=2, padx=5, pady=5)
+
         def save_settings():
             self.sender_email = entry_sender.get().strip()
             self.sender_password = entry_sender_pw.get().strip()
             self.recipient_email = entry_recipient.get().strip()
-            messagebox.showinfo("設定完了", "メール設定を更新しました。")
+            self.EXCEL_FILE = entry_excel.get().strip()
+            messagebox.showinfo("設定完了", "メールおよび台帳設定を更新しました。")
             settings_win.destroy()
 
-        tk.Button(settings_win, text="保存", command=save_settings).grid(row=3, column=0, padx=10, pady=15)
-        tk.Button(settings_win, text="キャンセル", command=settings_win.destroy).grid(row=3, column=1, padx=10, pady=15)
+        tk.Button(settings_win, text="保存", command=save_settings).grid(row=4, column=0, padx=10, pady=15)
+        tk.Button(settings_win, text="キャンセル", command=settings_win.destroy).grid(row=4, column=1, padx=10, pady=15)
 
     def check_low_stock(self):
         low_stock_items = []
@@ -520,7 +642,8 @@ class InventoryApp:
                 qty = 0
             else:
                 qty = int(qty)
-            if qty <= self.LOW_STOCK_THRESHOLD:
+            # order_pending が True の場合は既に発注中なので通知対象外とする
+            if qty <= self.LOW_STOCK_THRESHOLD and not item.get("order_pending", False):
                 low_stock_items.append(item)
         if low_stock_items:
             items_str = "\n".join([
