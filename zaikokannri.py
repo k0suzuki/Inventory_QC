@@ -15,6 +15,41 @@ env_loaded = load_dotenv()
 if not env_loaded:
     print(".envファイルの読み込みに失敗しました。デフォルト値を使用します。")
 
+class CenteredAskString(simpledialog.Dialog):
+    def __init__(self, parent, title, prompt):
+        self.prompt = prompt
+        self.result = None
+        super().__init__(parent, title)
+
+    def body(self, master):
+        tk.Label(master, text=self.prompt).pack(padx=10, pady=10)
+        self.entry = tk.Entry(master)
+        self.entry.pack(padx=10, pady=10)
+        return self.entry
+
+    def center_window(self):
+        self.update_idletasks()
+        width = self.winfo_width()
+        height = self.winfo_height()
+        screen_width = self.winfo_screenwidth()
+        screen_height = self.winfo_screenheight()
+        x = (screen_width - width) // 2
+        y = (screen_height - height) // 2
+        self.geometry(f'{width}x{height}+{x}+{y}')
+
+    def apply(self):
+        self.result = self.entry.get().strip()
+
+    def show(self):
+        # マッピング後に中央配置を呼び出す
+        self.after(0, self.center_window)
+        self.wait_window()
+        return self.result
+
+def ask_centered_string(parent, title, prompt):
+    dlg = CenteredAskString(parent, title, prompt)
+    return dlg.result
+
 def send_low_stock_email_no_oauth(low_stock_items, sender_email_default, sender_password_default, recipient_email):
     # 環境変数から認証情報取得（設定されていない場合はデフォルト値を利用）
     sender_email = os.getenv("GMAIL_USER", sender_email_default)
@@ -41,6 +76,59 @@ def send_low_stock_email_no_oauth(low_stock_items, sender_email_default, sender_
         print("在庫不足通知メールを送信しました。")
     except Exception as e:
         print("メール送信に失敗しました:", e)
+
+def ask_integer_modal(parent, title, prompt, minvalue=1):
+    dialog = tk.Toplevel(parent)
+    dialog.title(title)
+    dialog.transient(parent)
+    dialog.grab_set()       # モーダルにする
+    dialog.focus_force()    # 最前面に表示
+
+    # 画面中央に配置する計算
+    dialog.update_idletasks()
+    w = dialog.winfo_width()
+    h = dialog.winfo_height()
+    ws = dialog.winfo_screenwidth()
+    hs = dialog.winfo_screenheight()
+    x = (ws // 2) - (w // 2)
+    y = (hs // 2) - (h // 2)
+    dialog.geometry(f'+{x}+{y}')
+
+    tk.Label(dialog, text=prompt).pack(padx=10, pady=10)
+
+    # 初期値は空白に設定
+    var = tk.StringVar(value="")
+    entry = tk.Entry(dialog, textvariable=var)
+    entry.pack(padx=10, pady=10)
+    entry.focus_force()
+
+    result = []
+    def on_ok(event=None):
+        entered = var.get().strip()
+        if entered == "":
+            messagebox.showerror("入力エラー", "値を入力してください。", parent=dialog)
+            return
+        try:
+            value = int(entered)
+            if value < minvalue:
+                messagebox.showerror("入力エラー", f"{minvalue}以上の整数を入力してください。", parent=dialog)
+                return
+            result.append(value)
+        except ValueError:
+            messagebox.showerror("入力エラー", "整数値を入力してください。", parent=dialog)
+            return
+        dialog.destroy()
+
+    # ボタンを横並びに配置するためのフレーム
+    btn_frame = tk.Frame(dialog)
+    btn_frame.pack(pady=5)
+    tk.Button(btn_frame, text="OK", command=on_ok).pack(side="left", padx=5)
+    tk.Button(btn_frame, text="キャンセル", command=dialog.destroy).pack(side="left", padx=5)
+    # EnterキーでOKを実行
+    dialog.bind("<Return>", on_ok)
+
+    parent.wait_window(dialog)
+    return result[0] if result else None
 
 class InventoryApp:
     EXCEL_FILE = r"C:\Users\ksuzuki4\Desktop\台帳.xlsx"
@@ -266,9 +354,9 @@ class InventoryApp:
         """カメラからQRコードを読み取る。キャンセルボタンで中断可能"""
         cancel_window = tk.Toplevel(self.root)
         cancel_window.title("QRコード読み取り中")
-        cancel_window.attributes("-topmost", True)
-        cancel_window.grab_set()
-        cancel_window.focus_force()
+        # cancel_window.attributes("-topmost", True)
+        # cancel_window.grab_set()
+        # cancel_window.focus_force()
         tk.Label(cancel_window, text="QRコード読み取り中です…").pack(padx=10, pady=10)
         tk.Button(cancel_window, text="キャンセル", command=lambda: self.cancel_qr_button(cancel_window)).pack(pady=10)
 
@@ -337,24 +425,34 @@ class InventoryApp:
             messagebox.showinfo("QRコード生成", f"QRコード画像を保存しました: {save_path}")
 
     def import_csv(self):
-        filepath = filedialog.askopenfilename(filetypes=[("CSV Files", "*.csv")])
+        filepath = filedialog.askopenfilename(filetypes=[("CSV Files", "*.csv"), ("Excel Files", "*.xlsx;*.xls")])
         if not filepath:
             return
         try:
-            data = pd.read_csv(filepath)
-            required = ['id', 'name', 'category', 'quantity']
+            # ファイル拡張子によって読み込み方法を切り替える
+            if filepath.lower().endswith(('.xlsx', '.xls')):
+                data = pd.read_excel(filepath)
+            else:
+                data = pd.read_csv(filepath)
+            
+            required = ['id', 'name', 'category', 'quantity', 'location', 'threshold', 'order_pending']
             missing = [col for col in required if col not in data.columns]
             if missing:
                 messagebox.showerror("CSVエラー", f"次の列が不足しています: {', '.join(missing)}")
                 return
+            
             for _, row in data.iterrows():
                 self.inventory_data.append({
                     "id": row['id'],
                     "name": row['name'],
                     "category": row['category'],
-                    "quantity": row['quantity']
+                    "quantity": row['quantity'],
+                    "location": row['location'],
+                    "threshold": row['threshold'],
+                    # order_pending 列が存在するかチェックし、欠損値の場合は False を設定
+                    "order_pending": row['order_pending'] if not pd.isna(row.get('order_pending', False)) else False
                 })
-            messagebox.showinfo("CSVインポート", "CSVファイルのインポートが成功しました！")
+            messagebox.showinfo("CSVインポート", "CSV/Excelファイルのインポートが成功しました！")
             self.update_inventory_display()
             self.update_category_checkboxes()
             self.update_location_checkboxes()
@@ -378,20 +476,15 @@ class InventoryApp:
                 item_values = self.inventory_tree.item(selected[0], "values")
                 selected_item = next((item for item in self.inventory_data if str(item["id"]) == str(item_values[0])), None)
             else:
-                # リストに選択がない場合、手動入力するかどうか確認する
-                use_manual = messagebox.askyesno("ID入力確認", 
-                                "リストに選択がありません。\nIDを手動で入力しますか？\n「いいえ」を選択すると、再度リストから選択できます。")
-                if use_manual:
-                    entered_id = simpledialog.askstring("ID入力", "入庫する商品のIDを入力してください:", parent=self.root)
-                    if not entered_id:
-                        return
-                    selected_item = next((item for item in self.inventory_data if str(item["id"]) == str(entered_id)), None)
-                    if not selected_item:
-                        return messagebox.showerror("品番エラー", "入力されたIDに対応する品番が見つかりません。")
-                else:
+                # 直接手動入力に切り替える
+                entered_id = ask_centered_string(self.root, "ID入力", "入庫する商品のIDを入力してください:")
+                if not entered_id:
                     return
+                selected_item = next((item for item in self.inventory_data if str(item["id"]) == str(entered_id)), None)
+                if not selected_item:
+                    return messagebox.showerror("品番エラー", "入力されたIDに対応する品番が見つかりません。")
 
-        add_qty = simpledialog.askinteger("入庫", f"{selected_item['name']} の入庫数量を入力してください", parent=self.root, minvalue=1)
+        add_qty = ask_integer_modal(self.root, "入庫", f"{selected_item['name']} の入庫数量を入力してください", minvalue=1)
         if add_qty is None:
             return
 
@@ -402,6 +495,8 @@ class InventoryApp:
         try:
             current_qty = int(selected_item.get("quantity", 0))
             selected_item["quantity"] = current_qty + add_qty
+            if selected_item.get("order_pending", False):
+                selected_item["order_pending"] = False
         except Exception:
             selected_item["quantity"] = add_qty
 
@@ -409,7 +504,6 @@ class InventoryApp:
         self.save_inventory_to_excel()
         messagebox.showinfo("入庫完了", f"{selected_item['name']} を {add_qty} 個 入庫しました。")
         self.record_log("入庫", selected_item, add_qty)
-
 
     def stock_out(self):
         choice = messagebox.askquestion("出庫方法選択", 
@@ -427,17 +521,13 @@ class InventoryApp:
                 item_values = self.inventory_tree.item(selected[0], "values")
                 selected_item = next((item for item in self.inventory_data if str(item["id"]) == str(item_values[0])), None)
             else:
-                use_manual = messagebox.askyesno("ID入力確認", 
-                                "リストに選択がありません。\nIDを手動で入力しますか？\n「いいえ」を選択すると、再度リストから選択できます。")
-                if use_manual:
-                    entered_id = simpledialog.askstring("ID入力", "出庫する商品のIDを入力してください:", parent=self.root)
-                    if not entered_id:
-                        return
-                    selected_item = next((item for item in self.inventory_data if str(item["id"]) == str(entered_id)), None)
-                    if not selected_item:
-                        return messagebox.showerror("品番エラー", "入力されたIDに対応する品番が見つかりません。")
-                else:
+                # 直接手動入力に切り替える
+                entered_id = ask_centered_string(self.root, "ID入力", "出庫する商品のIDを入力してください:")
+                if not entered_id:
                     return
+                selected_item = next((item for item in self.inventory_data if str(item["id"]) == str(entered_id)), None)
+                if not selected_item:
+                    return messagebox.showerror("品番エラー", "入力されたIDに対応する品番が見つかりません。")
 
         remove_qty = simpledialog.askinteger("出庫", f"{selected_item['name']} の出庫数量を入力してください", parent=self.root, minvalue=1)
         if remove_qty is None:
@@ -568,7 +658,7 @@ class InventoryApp:
             use_manual = messagebox.askyesno("ID入力確認", 
                                 "リストに選択がありません。\nIDを手動で入力しますか？\n「いいえ」を選択すると、再度リストから選択できます。")
             if use_manual:
-                entered_id = simpledialog.askstring("ID入力", "発注する商品のIDを入力してください:", parent=self.root)
+                entered_id = ask_centered_string(self.root, "ID入力", "発注する商品のIDを入力してください:")
                 if not entered_id:
                     return
                 selected_item = next((item for item in self.inventory_data if str(item["id"]) == str(entered_id)), None)
